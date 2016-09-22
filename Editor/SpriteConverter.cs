@@ -37,13 +37,18 @@ namespace SpriteToMeshConverter
                 data.shader = Shader.Find("Sprites/Default");
                 EditorUtility.SetDirty(data);  
             }
+            if(data.sprite)
+            {
+                data.size = new Vector2(data.sprite.rect.width / data.pixelsPerUnit, data.sprite.rect.height / data.pixelsPerUnit);
+                EditorUtility.SetDirty(data);  
+            }
         }
 
         void OnGUI()
         {
             var rect = EditorGUILayout.GetControlRect();
             EditorGUI.LabelField(new Rect(rect.x, rect.y, 110, 20), "Select Sprite:");
-            var s = data.sprite;
+            var s = data.sprite; 
             data.sprite = EditorGUI.ObjectField(new Rect(rect.x, rect.y, 100, 100), data.sprite, typeof(Sprite), true) as Sprite;
             if (data.sprite == null) return;
             GUILayout.Space(5);
@@ -62,6 +67,7 @@ namespace SpriteToMeshConverter
                 data.assetName = data.sprite.name;
                 data.textureHeight = (int) data.sprite.rect.height;
                 data.textureWidth = (int) data.sprite.rect.width;
+                data.size = new Vector2(data.sprite.rect.width / data.pixelsPerUnit, data.sprite.rect.height / data.pixelsPerUnit);
                 data.texSize = 1;
             }
             rect.y += 110;
@@ -276,9 +282,9 @@ namespace SpriteToMeshConverter
         /// </summary>
         /// <param name="sprite"> Sprite to tale texture from</param>
         /// <param name="relativePath"> Relative path to save texture to</param>
-        /// <param name="empty"> If checked, creates clear texture in stead of capturing from sprite source texture</param>
+        /// <param name="clear"> If checked, creates clear texture in stead of capturing from sprite source texture</param>
         /// <returns></returns>
-        public static Texture2D SaveTextureFromSprite(Sprite sprite, string relativePath, bool empty)
+        public static Texture2D SaveTextureFromSprite(Sprite sprite,bool clear)
         {
             var t = new Texture2D((int) sprite.rect.width, (int) sprite.rect.height, TextureFormat.ARGB32, true);
             var offset = new Vector2(sprite.rect.x, sprite.rect.y);
@@ -288,20 +294,15 @@ namespace SpriteToMeshConverter
             {
                 for (int y = 0; y < t.height; y++)
                 {
-                    if(empty)
-                        t.SetPixel(x, y, Color.clear);
-                    else
-                    {
-                        t.SetPixel(x, y, sprite.texture.GetPixel((int)(x + offset.x), (int)(y + offset.y)));
-                    }
+                    var c = sprite.texture.GetPixel((int) (x + offset.x), (int) (y + offset.y));
+                    if (clear)
+                        c.a = 0;
+                    t.SetPixel(x, y, c);
+                    
                 }
             }
             t.Apply();
-            File.WriteAllBytes(Application.dataPath + "/" + relativePath, t.EncodeToPNG());
-            AssetDatabase.ImportAsset("Assets/" + relativePath);
-            if(!txtIsReadable)
-                MakeTextureReadable(sprite.texture, false);
-            return AssetDatabase.LoadAssetAtPath<Texture2D>("Assets/" + relativePath);
+            return t;
         }
 
         /// <summary>
@@ -380,7 +381,12 @@ namespace SpriteToMeshConverter
             AssetDatabase.AddObjectToAsset(mat, prefab);
             if(data.useDecal)
             {
-                var decal = CreateBlankTexture(data.sprite.rect, data.decalSize);
+                var decal = SaveTextureFromSprite(data.sprite, true);
+                if(data.decalSize != 1)
+                {
+                    TextureResizing.Bilinear(decal, (int)(decal.width * data.decalSize), (int) (decal.height * data.decalSize));
+                }
+                decal.wrapMode = TextureWrapMode.Clamp;
                 decal.name = "decal";
                 AssetDatabase.AddObjectToAsset(decal, prefab);
                 if(mat.HasProperty("_DecalTex"))
@@ -422,7 +428,12 @@ namespace SpriteToMeshConverter
             if (data.useDecal)
             {
                 var decalPath = path + "/decal.png";
-                var decal = CreateBlankTexture(data.sprite.rect, data.decalSize);
+                var decal = SaveTextureFromSprite(data.sprite, true);
+                if (data.decalSize != 1)
+                {
+                    TextureResizing.Bilinear(decal, (int) (decal.width * data.decalSize), (int) (decal.height * data.decalSize));
+                }
+                decal.wrapMode = TextureWrapMode.Clamp;
                 decal.name = "decal";
                 var b = decal.EncodeToPNG();
                 File.WriteAllBytes(Application.dataPath.Remove(Application.dataPath.Length - 6, 6) + decalPath, b);
@@ -494,7 +505,7 @@ namespace SpriteToMeshConverter
             original.textureFormat = t_format;
             original.SaveAndReimport();
             if (map.width != data.textureWidth || map.height != data.textureHeight)
-                Bilinear(map, data.textureWidth, data.textureHeight);
+                TextureResizing.Bilinear(map, data.textureWidth, data.textureHeight);
             var b = map.EncodeToPNG();
             File.WriteAllBytes(path, b);
             AssetDatabase.ImportAsset(path);
@@ -511,150 +522,6 @@ namespace SpriteToMeshConverter
             return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
         }
 
-        #region Texture Resizing
-
-        public class ThreadData
-        {
-            public int start;
-            public int end;
-            public ThreadData(int s, int e)
-            {
-                start = s;
-                end = e;
-            }
-        }
-
-        public static void Point(Texture2D tex, int newWidth, int newHeight)
-        {
-            ThreadedScale(tex, newWidth, newHeight, false);
-        }
-        public static void Bilinear(Texture2D tex, int newWidth, int newHeight)
-        {
-            ThreadedScale(tex, newWidth, newHeight, true);
-        }
-        static Color[] texColors, newColors;
-        static float ratioX, ratioY;
-        static int finishCount;
-        static Mutex mutex;
-        static int w, w1, w2;
-        private static void ThreadedScale(Texture2D tex, int newWidth, int newHeight, bool useBilinear)
-        {
-            texColors = tex.GetPixels();
-            newColors = new Color[newWidth * newHeight];
-            if (useBilinear)
-            {
-                ratioX = 1.0f / ((float) newWidth / (tex.width - 1));
-                ratioY = 1.0f / ((float) newHeight / (tex.height - 1));
-            }
-            else
-            {
-                ratioX = ((float) tex.width) / newWidth;
-                ratioY = ((float) tex.height) / newHeight;
-            }
-            w = tex.width;
-            w2 = newWidth;
-            var cores = Mathf.Min(SystemInfo.processorCount, newHeight);
-            var slice = newHeight / cores;
-
-            finishCount = 0;
-            if (mutex == null)
-            {
-                mutex = new Mutex(false);
-            }
-            if (cores > 1)
-            {
-                int i = 0;
-                ThreadData threadData;
-                for (i = 0; i < cores - 1; i++)
-                {
-                    threadData = new ThreadData(slice * i, slice * (i + 1));
-                    ParameterizedThreadStart ts = useBilinear ? new ParameterizedThreadStart(BilinearScale) : new ParameterizedThreadStart(PointScale);
-                    Thread thread = new Thread(ts);
-                    thread.Start(threadData);
-                }
-                threadData = new ThreadData(slice * i, newHeight);
-                if (useBilinear)
-                {
-                    BilinearScale(threadData);
-                }
-                else
-                {
-                    PointScale(threadData);
-                }
-                while (finishCount < cores)
-                {
-                    Thread.Sleep(1);
-                }
-            }
-            else
-            {
-                ThreadData threadData = new ThreadData(0, newHeight);
-                if (useBilinear)
-                {
-                    BilinearScale(threadData);
-                }
-                else
-                {
-                    PointScale(threadData);
-                }
-            }
-
-            tex.Resize(newWidth, newHeight);
-            tex.SetPixels(newColors);
-            tex.Apply();
-        }
-        public static void BilinearScale(System.Object obj)
-        {
-            ThreadData threadData = (ThreadData) obj;
-            for (var y = threadData.start; y < threadData.end; y++)
-            {
-                int yFloor = (int) Mathf.Floor(y * ratioY);
-                var y1 = yFloor * w;
-                var y2 = (yFloor + 1) * w;
-                var yw = y * w2;
-
-                for (var x = 0; x < w2; x++)
-                {
-                    int xFloor = (int) Mathf.Floor(x * ratioX);
-                    var xLerp = x * ratioX - xFloor;
-                    newColors[yw + x] = ColorLerpUnclamped(ColorLerpUnclamped(texColors[y1 + xFloor], texColors[y1 + xFloor + 1], xLerp),
-                                                           ColorLerpUnclamped(texColors[y2 + xFloor], texColors[y2 + xFloor + 1], xLerp),
-                                                           y * ratioY - yFloor);
-                }
-            }
-
-            mutex.WaitOne();
-            finishCount++;
-            mutex.ReleaseMutex();
-        }
-        public static void PointScale(System.Object obj)
-        {
-            ThreadData threadData = (ThreadData) obj;
-            for (var y = threadData.start; y < threadData.end; y++)
-            {
-                var thisY = (int) (ratioY * y) * w;
-                var yw = y * w2;
-                for (var x = 0; x < w2; x++)
-                {
-                    newColors[yw + x] = texColors[(int) (thisY + ratioX * x)];
-                }
-            }
-
-            mutex.WaitOne();
-            finishCount++;
-            mutex.ReleaseMutex();
-        }
-        private static Color ColorLerpUnclamped(Color c1, Color c2, float value)
-        {
-            return new Color(c1.r + (c2.r - c1.r) * value,
-                              c1.g + (c2.g - c1.g) * value,
-                              c1.b + (c2.b - c1.b) * value,
-                              c1.a + (c2.a - c1.a) * value);
-        }
-
-        #endregion
-
     }
-
 
 }
